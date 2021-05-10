@@ -1,39 +1,106 @@
-// Copyright © 2016 Alan A. A. Donovan & Brian W. Kernighan.
-// License: https://creativecommons.org/licenses/by-nc-sa/4.0/
-
-// See page 227.
-
-// Netcat is a simple read/write client for TCP servers.
 package main
 
 import (
+	"bufio"
+	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"os"
+	"strings"
 )
 
-//!+
+const (
+	cmdRegister = "/reg"
+	cmdMessage  = "/msg"
+	cmdUsers    = "/users"
+	cmdUser     = "/user"
+	cmdTime     = "/time"
+	cmdKick     = "/kick"
+)
+
+var (
+	allCommands = []string{cmdRegister, cmdMessage, cmdUsers, cmdUser, cmdTime, cmdKick}
+
+	reader = bufio.NewReader(os.Stdin)
+)
+
 func main() {
-	conn, err := net.Dial("tcp", "localhost:8000")
-	if err != nil {
-		log.Fatal(err)
+
+	username := flag.String("user", "", "your chat name")
+	server := flag.String("server", "localhost:9000", "the server to connect to")
+	flag.Parse()
+
+	if *username == "" {
+		fmt.Println("user must be passed")
+		return
 	}
-	done := make(chan struct{})
+
+	connection, err := net.Dial("tcp", *server)
+	if err != nil {
+		log.Fatalf("Unable to connect to '%s' - '%s'", *server, err)
+	}
+
+	// read from connection
 	go func() {
-		io.Copy(os.Stdout, conn) // NOTE: ignoring errors
-		log.Println("done")
-		done <- struct{}{} // signal the main goroutine
+		buffer := make([]byte, 4096)
+		for {
+			bytesRead, err := connection.Read(buffer)
+			if err != nil {
+				if io.EOF == err {
+					log.Fatal("Connection closed by server")
+					return
+				}
+				log.Fatal(err)
+			}
+			fmt.Printf("\r                                                    \r%s\n", string(buffer[:bytesRead]))
+			fmt.Printf("%s > ", *username)
+		}
 	}()
-	mustCopy(conn, os.Stdin)
-	conn.Close()
-	<-done // wait for background goroutine to finish
+
+	// write to connection
+	go func() {
+		register(connection, *username)
+
+		for {
+			fmt.Printf("%s > ", *username)
+			text, err := reader.ReadString('\n')
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			sendMessage(connection, text)
+		}
+	}()
+
+	select {}
 }
 
-//!-
-
-func mustCopy(dst io.Writer, src io.Reader) {
-	if _, err := io.Copy(dst, src); err != nil {
+func register(connection net.Conn, name string) {
+	message := fmt.Sprintf("%s %s", cmdRegister, name)
+	if _, err := connection.Write([]byte(message)); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func sendMessage(connection net.Conn, text string) {
+	// convert CRLF to LF
+	text = strings.ReplaceAll(text, "\n", "")
+	if !messageIsCommand(text) {
+		text = fmt.Sprintf("%s all %s", cmdMessage, text)
+	}
+
+	if _, err := connection.Write([]byte(text)); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func messageIsCommand(text string) bool {
+	for _, command := range allCommands {
+		if strings.HasPrefix(text, command) {
+			return true
+		}
+	}
+	return false
 }
